@@ -1,66 +1,76 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 import joblib
-import pandas as pd
+import numpy as np
 
-app = FastAPI(title="AEWS Machine Learning Service", version="1.0")
+app = FastAPI(title="AEWS AI Engine API")
 
+# Konfigurasi CORS agar Next.js (port 3000) bisa ngobrol dengan FastAPI (port 8001)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], # Ganti "http://localhost:3000" jika ingin lebih aman
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 1. LOAD MODEL RANDOM FOREST ASLI DARI COLAB (.joblib)
+# 1. Load Model Random Forest yang baru (5 Variabel)
 try:
-    rf_model = joblib.load('random_forest_model.joblib')
-    print("✅ Model Random Forest ASLI berhasil dimuat!")
+    model = joblib.load('random_forest_model_ats.joblib')
+    print("✅ Model Machine Learning berhasil dimuat!")
 except Exception as e:
-    print("❌ Gagal memuat model:", e)
+    print(f"❌ Gagal memuat model: {e}")
 
-# PERBAIKAN: Ubah discussionHours menjadi discussionScore agar sinkron dengan Frontend
-class StudentMetrics(BaseModel):
+# 2. Definisikan format data yang akan diterima dari Next.js
+class StudentData(BaseModel):
+    ipk: float
     attendanceRate: float
     assignmentScore: float
-    discussionScore: float 
+    quizScore: float
+    atsScore: float
 
 @app.get("/")
 def read_root():
-    return {"message": "AEWS Machine Learning Engine is Online"}
+    return {"message": "AEWS Machine Learning Engine is Running!"}
 
+# 3. Endpoint Prediksi
 @app.post("/predict")
-def predict_student_risk(data: StudentMetrics):
-    input_df = pd.DataFrame([{
-        'Kehadiran (%)': data.attendanceRate,
-        'Nilai Tugas (rata-rata)': data.assignmentScore,
-        # PERBAIKAN: Panggil data.discussionScore di sini
-        'Partisipasi Diskusi (skor)': data.discussionScore 
-    }])
-    
-    # Ambil probabilitas kelas [Peluang Aman (0), Peluang Berisiko (1)]
-    probabilities = rf_model.predict_proba(input_df)[0]
-    print("Array Probabilitas:", probabilities)
-    
-    # Ambil persentase risiko dari indeks ke-1 (Kelas Berisiko)
-    final_score = float(probabilities[1]) * 100
-    final_score = round(final_score, 2)
-    
-    # Tentukan status berdasarkan besar kecilnya skor risiko
-    if final_score >= 60:
-        risk_status = "HIGH RISK"
-        recommendation = "PERINGATAN DINI AI: Risiko kegagalan tinggi. Butuh intervensi segera!"
-    elif final_score >= 30:
-        risk_status = "MEDIUM RISK"
-        recommendation = "AI mendeteksi potensi penurunan performa akademik."
-    else:
-        risk_status = "SAFE"
-        recommendation = "Performa mahasiswa stabil dan aman."
+def predict_risk(data: StudentData):
+    try:
+        # Urutan array HARUS SAMA PERSIS dengan saat training di Colab:
+        # ['IPK', 'Kehadiran (%)', 'Nilai Tugas', 'Kuis', 'Nilai ATS']
+        input_data = np.array([[
+            data.ipk, 
+            data.attendanceRate, 
+            data.assignmentScore, 
+            data.quizScore, 
+            data.atsScore
+        ]])
 
-    return {
-        "predictedScore": final_score,
-        "riskStatus": risk_status,
-        "recommendation": recommendation
-    }
+        # Melakukan prediksi status (0 = Aman, 1 = Berisiko)
+        prediction = model.predict(input_data)[0]
+        
+        # Mengambil persentase probabilitas berisiko (indeks 1)
+        probabilities = model.predict_proba(input_data)[0]
+        risk_probability = float(probabilities[1]) * 100 
+        
+        # Logika Status Risiko (Terserah lu mau diset di angka berapa, ini contoh ideal)
+        if risk_probability >= 60:
+            risk_status = "HIGH RISK"
+            recommendation = "Mahasiswa memiliki probabilitas tinggi untuk gagal. Segera lakukan pemanggilan untuk konseling akademik."
+        elif risk_probability >= 30:
+            risk_status = "MEDIUM RISK"
+            recommendation = "Mahasiswa mulai menunjukkan tanda penurunan akademik. Berikan teguran lisan atau pesan motivasi."
+        else:
+            risk_status = "SAFE"
+            recommendation = "Performa akademik mahasiswa stabil dan aman. Lanjutkan pemantauan rutin."
+
+        return {
+            "predictedScore": round(risk_probability, 1),
+            "riskStatus": risk_status,
+            "recommendation": recommendation
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
